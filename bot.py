@@ -116,19 +116,39 @@ async def get_telegraph_token() -> str:
     return telegraph_access_token
 
 
-async def upload_image_to_telegraph(application: Application, file_id: str, filename: str) -> str:
+async def upload_image_to_telegraph(application: Application, file_id: str, filename: str, mime_type: str = "image/jpeg") -> str:
     tg_file = await application.bot.get_file(file_id)
     file_bytes = await tg_file.download_as_bytearray()
-    form = FormData()
-    form.add_field("file", bytes(file_bytes), filename=filename, content_type="image/jpeg")
 
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        )
+    }
+
+    last_error: Any = None
     async with ClientSession() as session:
-        async with session.post(TELEGRAPH_UPLOAD_URL, data=form, timeout=120) as response:
-            data = await response.json(content_type=None)
+        for attempt in range(3):
+            form = FormData()
+            form.add_field("file", bytes(file_bytes), filename=filename, content_type=mime_type)
+            try:
+                async with session.post(
+                    TELEGRAPH_UPLOAD_URL, data=form, timeout=120, headers=headers
+                ) as response:
+                    data = await response.json(content_type=None)
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(2 * (attempt + 1))
+                continue
 
-    if not isinstance(data, list) or not data or "src" not in data[0]:
-        raise RuntimeError(f"Telegraph image upload failed: {data}")
-    return "https://telegra.ph" + data[0]["src"]
+            if isinstance(data, list) and data and "src" in data[0]:
+                return "https://telegra.ph" + data[0]["src"]
+
+            last_error = data
+            await asyncio.sleep(2 * (attempt + 1))
+
+    raise RuntimeError(f"Telegraph image upload failed after retries: {last_error}")
 
 
 async def create_telegraph_page(application: Application, image_items: list[dict[str, str]]) -> str:
