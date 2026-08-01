@@ -21,6 +21,7 @@ ADMIN_IDS = {
 }
 PORT = int(os.getenv("PORT", "10000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
+IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "")
 
 FIXED_TITLE = "@𝗗𝗲𝘀𝗶𝗕𝗮𝗱𝗱𝗶𝗲𝗛𝘂𝗯 𝗼𝗻 𝗧𝗲𝗹𝗲𝗴𝗿𝗮𝗺"
 FIXED_DESCRIPTION = "Search @DesiBaddieHub To Watch More Spicy 🔥 Content 😍"
@@ -30,7 +31,7 @@ PROVIDED_BY = "@DesiBaddieHub"
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}]+", re.IGNORECASE)
 TELEGRAPH_ACCOUNT_URL = "https://api.telegra.ph/createAccount"
 TELEGRAPH_CREATE_PAGE_URL = "https://api.telegra.ph/createPage"
-TELEGRAPH_UPLOAD_URL = "https://telegra.ph/upload"
+IMGBB_UPLOAD_URL = "https://api.imgbb.com/1/upload"
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
@@ -116,39 +117,38 @@ async def get_telegraph_token() -> str:
     return telegraph_access_token
 
 
-async def upload_image_to_telegraph(application: Application, file_id: str, filename: str, mime_type: str = "image/jpeg") -> str:
+async def upload_image_to_imgbb(application: Application, file_id: str, filename: str) -> str:
+    if not IMGBB_API_KEY:
+        raise RuntimeError("IMGBB_API_KEY env variable is required.")
+
     tg_file = await application.bot.get_file(file_id)
     file_bytes = await tg_file.download_as_bytearray()
 
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        )
-    }
+    form = FormData()
+    form.add_field("key", IMGBB_API_KEY)
+    form.add_field("image", bytes(file_bytes), filename=filename, content_type="image/jpeg")
 
     last_error: Any = None
     async with ClientSession() as session:
         for attempt in range(3):
-            form = FormData()
-            form.add_field("file", bytes(file_bytes), filename=filename, content_type=mime_type)
             try:
-                async with session.post(
-                    TELEGRAPH_UPLOAD_URL, data=form, timeout=120, headers=headers
-                ) as response:
+                async with session.post(IMGBB_UPLOAD_URL, data=form, timeout=120) as response:
                     data = await response.json(content_type=None)
             except Exception as exc:
                 last_error = exc
                 await asyncio.sleep(2 * (attempt + 1))
                 continue
 
-            if isinstance(data, list) and data and "src" in data[0]:
-                return "https://telegra.ph" + data[0]["src"]
+            if data.get("success") and data.get("data", {}).get("url"):
+                return data["data"]["url"]
 
             last_error = data
             await asyncio.sleep(2 * (attempt + 1))
+            form = FormData()
+            form.add_field("key", IMGBB_API_KEY)
+            form.add_field("image", bytes(file_bytes), filename=filename, content_type="image/jpeg")
 
-    raise RuntimeError(f"Telegraph image upload failed after retries: {last_error}")
+    raise RuntimeError(f"ImgBB image upload failed after retries: {last_error}")
 
 
 async def create_telegraph_page(application: Application, image_items: list[dict[str, str]]) -> str:
@@ -156,7 +156,7 @@ async def create_telegraph_page(application: Application, image_items: list[dict
 
     image_nodes: list[dict[str, Any]] = []
     for idx, item in enumerate(image_items, start=1):
-        image_url = await upload_image_to_telegraph(application, item["file_id"], f"image_{idx}.jpg")
+        image_url = await upload_image_to_imgbb(application, item["file_id"], f"image_{idx}.jpg")
         image_nodes.append({"tag": "img", "attrs": {"src": image_url}})
 
     content = [
