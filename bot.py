@@ -55,14 +55,27 @@ def admin_only(func):
     return wrapper
 
 
+STAGE_IMAGES = "images"
+STAGE_LINKS = "links"
+
+
 def get_session(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     return context.user_data.setdefault(
         "draft",
         {
+            "stage": STAGE_IMAGES,
             "images": [],
             "links": [],
+            "telegraph_url": None,
         },
     )
+
+
+def add_links(draft: dict[str, Any], urls: list[str]) -> None:
+    for url in urls:
+        if is_telegram_link(url):
+            continue
+        draft["links"].append(url)
 
 
 def dedupe_keep_order(items: list[str]) -> list[str]:
@@ -182,13 +195,18 @@ async def create_telegraph_page(application: Application, image_items: list[dict
 
 @admin_only
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    context.user_data["draft"] = {"images": [], "links": []}
+    context.user_data["draft"] = {
+        "stage": STAGE_IMAGES,
+        "images": [],
+        "links": [],
+        "telegraph_url": None,
+    }
     await update.effective_message.reply_text(
-        "Session start ho gaya.\n"
-        "• Photos/image documents bhejo\n"
-        "• Text me video links bhejo\n"
-        "• Telegram channel links auto-ignore honge\n"
-        "• /done bhejke final post message banao"
+        "Session start ho gaya.\n\n"
+        "𝗦𝗧𝗘𝗣 𝟭: Photos/image documents bhejo, phir /done bhejo.\n"
+        "𝗦𝗧𝗘𝗣 𝟮: Uske baad video links bhejo (text ya photo+caption dono chalega), "
+        "phir /done phir se bhejo final post banane ke liye.\n"
+        "• Telegram channel links auto-ignore honge"
     )
 
 
@@ -201,22 +219,54 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @admin_only
 async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     draft = get_session(context)
-    if not draft["images"]:
-        await update.effective_message.reply_text("Kam se kam 1 image bhejo.")
+    stage = draft.get("stage", STAGE_IMAGES)
+
+    if stage == STAGE_IMAGES:
+        if not draft["images"]:
+            await update.effective_message.reply_text("Kam se kam 1 image bhejo.")
+            return
+
+        status_message = await update.effective_message.reply_text("Photos upload ho rahi hain...")
+        try:
+            telegraph_url = await create_telegraph_page(context.application, draft["images"])
+            draft["telegraph_url"] = telegraph_url
+            draft["stage"] = STAGE_LINKS
+            draft["images"] = []
+            await status_message.edit_text(
+                "Photos upload ho gaye ✅\n"
+                f"Telegraph: {telegraph_url}\n\n"
+                "𝗦𝗧𝗘𝗣 𝟮: Ab video links bhejo (text ya photo+caption dono chalega).\n"
+                "Jab sab bhej do, /done phir se bhejo."
+            )
+        except Exception as exc:
+            logger.exception("Failed to create telegraph page")
+            await status_message.edit_text(f"Error: {exc}")
+        return
+
+    telegraph_url = draft.get("telegraph_url")
+    if not telegraph_url:
+        await update.effective_message.reply_text("Pehle Step 1 complete karo: images bhejo aur /done karo.")
+        return
+
+    clean_links = dedupe_keep_order(draft["links"])
+    if not clean_links:
+        await update.effective_message.reply_text("Kam se kam 1 video link bhejo.")
         return
 
     status_message = await update.effective_message.reply_text("Processing...")
     try:
-        telegraph_url = await create_telegraph_page(context.application, draft["images"])
-        clean_links = [link for link in dedupe_keep_order(draft["links"]) if not is_telegram_link(link)]
-
         for link_group in chunked(clean_links, 5):
             await update.effective_chat.send_message(
                 build_output_message(telegraph_url, link_group),
                 disable_web_page_preview=True,
             )
 
-        context.user_data["draft"] = {"images": [], "links": []}
+        context.user_data["draft"] = {
+            "stage": STAGE_IMAGES,
+            "images": [],
+            "links": [],
+            "telegraph_url": None,
+        }
         await status_message.delete()
     except Exception as exc:
         logger.exception("Failed to finish session")
@@ -227,14 +277,23 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     draft = get_session(context)
     message = update.effective_message
+    stage = draft.get("stage", STAGE_IMAGES)
 
-    if message.photo:
-        draft["images"].append({"file_id": message.photo[-1].file_id})
+    is_image = bool(message.photo) or (
+        message.document and (message.document.mime_type or "").startswith("image/")
+    )
+
+    if stage == STAGE_IMAGES:
+        if is_image:
+            file_id = message.photo[-1].file_id if message.photo else message.document.file_id
+            draft["images"].append({"file_id": file_id})
         return
 
-    if message.document and (message.document.mime_type or "").startswith("image/"):
-        draft["images"].append({"file_id": message.document.file_id})
-        return
+    # Stage 2: image ka use nahi, sirf caption me se video link nikalna hai
+    caption = message.caption or ""
+    urls = URL_RE.findall(caption)
+    if urls:
+        add_links(draft, urls)
 
 
 @admin_only
@@ -245,11 +304,15 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text.startswith("/"):
         return
 
+    stage = draft.get("stage", STAGE_IMAGES)
+    if stage != STAGE_LINKS:
+        return
+
     urls = URL_RE.findall(text)
     if not urls:
         return
 
-    draft["links"].extend(urls)
+    add_links(draft, urls)
 
 
 async def start_health_server() -> web.AppRunner:
