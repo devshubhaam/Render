@@ -100,7 +100,7 @@ def chunked(items: list[str], size: int) -> list[list[str]]:
 
 
 def build_output_message(telegraph_url: str, links_chunk: list[str]) -> str:
-    video_lines = "\n".join(links_chunk)
+    video_lines = "\n\n".join(links_chunk)
     return (
         "𝗘𝘅𝗰𝗹𝘂𝘀𝗶𝘃𝗲 𝗩𝗶𝗱𝗲𝗼𝘀 😍\n\n"
         f"𝗣𝗵𝗼𝘁𝗼𝘀 👉 {telegraph_url}\n\n"
