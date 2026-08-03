@@ -1,12 +1,11 @@
 import asyncio
-import json
 import logging
 import os
 import re
 from functools import wraps
 from typing import Any
 
-from aiohttp import ClientSession, FormData, web
+from aiohttp import web
 from dotenv import load_dotenv
 from telegram import Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
@@ -21,25 +20,17 @@ ADMIN_IDS = {
 }
 PORT = int(os.getenv("PORT", "10000"))
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO").upper()
-IMGBB_API_KEY = os.getenv("IMGBB_API_KEY", "")
 
-FIXED_TITLE = "@𝗗𝗲𝘀𝗶𝗕𝗮𝗱𝗱𝗶𝗲𝗛𝘂𝗯 𝗼𝗻 𝗧𝗲𝗹𝗲𝗴𝗿𝗮𝗺"
-FIXED_DESCRIPTION = "Search @DesiBaddieHub To Watch More Spicy 🔥 Content 😍"
 BACKUP_CHANNEL_LINK = "https://t.me/+n5yhD-8_p79hMTQ1"
 PROVIDED_BY = "@DesiBaddieHub"
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}]+", re.IGNORECASE)
-TELEGRAPH_ACCOUNT_URL = "https://api.telegra.ph/createAccount"
-TELEGRAPH_CREATE_PAGE_URL = "https://api.telegra.ph/createPage"
-IMGBB_UPLOAD_URL = "https://api.imgbb.com/1/upload"
 
 logging.basicConfig(
     level=getattr(logging, LOG_LEVEL, logging.INFO),
     format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
 )
 logger = logging.getLogger("telegram.minimal.autopost")
-
-telegraph_access_token: str | None = None
 
 
 def admin_only(func):
@@ -55,18 +46,17 @@ def admin_only(func):
     return wrapper
 
 
-STAGE_IMAGES = "images"
-STAGE_LINKS = "links"
+STAGE_PHOTO_LINK = "photo_link"
+STAGE_VIDEO_LINKS = "video_links"
 
 
 def get_session(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
     return context.user_data.setdefault(
         "draft",
         {
-            "stage": STAGE_IMAGES,
-            "images": [],
+            "stage": STAGE_PHOTO_LINK,
+            "photo_link": None,
             "links": [],
-            "telegraph_url": None,
         },
     )
 
@@ -99,11 +89,11 @@ def chunked(items: list[str], size: int) -> list[list[str]]:
     return [items[i:i + size] for i in range(0, len(items), size)]
 
 
-def build_output_message(telegraph_url: str, links_chunk: list[str]) -> str:
+def build_output_message(photo_link: str, links_chunk: list[str]) -> str:
     video_lines = "\n\n".join(links_chunk)
     return (
         "𝗘𝘅𝗰𝗹𝘂𝘀𝗶𝘃𝗲 𝗩𝗶𝗱𝗲𝗼𝘀 😍\n\n"
-        f"𝗣𝗵𝗼𝘁𝗼𝘀 👉 {telegraph_url}\n\n"
+        f"𝗣𝗵𝗼𝘁𝗼𝘀 👉 {photo_link}\n\n"
         "𝗩𝗶𝗱𝗲𝗼𝘀 👇\n\n"
         f"{video_lines}\n\n"
         "🔰𝗝𝗢𝗜𝗡 𝗢𝗨𝗥 𝗕𝗔𝗖𝗞𝗨𝗣 𝗖𝗛𝗔𝗡𝗡𝗘𝗟🔰\n"
@@ -112,100 +102,18 @@ def build_output_message(telegraph_url: str, links_chunk: list[str]) -> str:
     ).strip()
 
 
-async def get_telegraph_token() -> str:
-    global telegraph_access_token
-    if telegraph_access_token:
-        return telegraph_access_token
-
-    payload = {
-        "short_name": "desibaddiehub-bot",
-        "author_name": PROVIDED_BY,
-    }
-    async with ClientSession() as session:
-        async with session.post(TELEGRAPH_ACCOUNT_URL, data=payload, timeout=60) as response:
-            data = await response.json()
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegraph account create failed: {data}")
-    telegraph_access_token = data["result"]["access_token"]
-    return telegraph_access_token
-
-
-async def upload_image_to_imgbb(application: Application, file_id: str, filename: str) -> str:
-    if not IMGBB_API_KEY:
-        raise RuntimeError("IMGBB_API_KEY env variable is required.")
-
-    tg_file = await application.bot.get_file(file_id)
-    file_bytes = await tg_file.download_as_bytearray()
-
-    form = FormData()
-    form.add_field("key", IMGBB_API_KEY)
-    form.add_field("image", bytes(file_bytes), filename=filename, content_type="image/jpeg")
-
-    last_error: Any = None
-    async with ClientSession() as session:
-        for attempt in range(3):
-            try:
-                async with session.post(IMGBB_UPLOAD_URL, data=form, timeout=120) as response:
-                    data = await response.json(content_type=None)
-            except Exception as exc:
-                last_error = exc
-                await asyncio.sleep(2 * (attempt + 1))
-                continue
-
-            if data.get("success") and data.get("data", {}).get("url"):
-                return data["data"]["url"]
-
-            last_error = data
-            await asyncio.sleep(2 * (attempt + 1))
-            form = FormData()
-            form.add_field("key", IMGBB_API_KEY)
-            form.add_field("image", bytes(file_bytes), filename=filename, content_type="image/jpeg")
-
-    raise RuntimeError(f"ImgBB image upload failed after retries: {last_error}")
-
-
-async def create_telegraph_page(application: Application, image_items: list[dict[str, str]]) -> str:
-    access_token = await get_telegraph_token()
-
-    image_nodes: list[dict[str, Any]] = []
-    for idx, item in enumerate(image_items, start=1):
-        image_url = await upload_image_to_imgbb(application, item["file_id"], f"image_{idx}.jpg")
-        image_nodes.append({"tag": "img", "attrs": {"src": image_url}})
-
-    content = [
-        {"tag": "p", "children": [FIXED_DESCRIPTION]},
-        *image_nodes,
-    ]
-    payload = {
-        "access_token": access_token,
-        "title": FIXED_TITLE,
-        "author_name": PROVIDED_BY,
-        "content": json.dumps(content, ensure_ascii=False),
-        "return_content": "false",
-    }
-
-    async with ClientSession() as session:
-        async with session.post(TELEGRAPH_CREATE_PAGE_URL, data=payload, timeout=120) as response:
-            data = await response.json()
-
-    if not data.get("ok"):
-        raise RuntimeError(f"Telegraph page create failed: {data}")
-    return data["result"]["url"]
-
-
 @admin_only
 async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data["draft"] = {
-        "stage": STAGE_IMAGES,
-        "images": [],
+        "stage": STAGE_PHOTO_LINK,
+        "photo_link": None,
         "links": [],
-        "telegraph_url": None,
     }
     await update.effective_message.reply_text(
         "Session start ho gaya.\n\n"
-        "𝗦𝗧𝗘𝗣 𝟭: Photos/image documents bhejo, phir /done bhejo.\n"
-        "𝗦𝗧𝗘𝗣 𝟮: Uske baad video links bhejo (text ya photo+caption dono chalega), "
-        "phir /done phir se bhejo final post banane ke liye.\n"
+        "𝗦𝗧𝗘𝗣 𝟭: JustPaste (photo) ka link bhejo.\n"
+        "𝗦𝗧𝗘𝗣 𝟮: Uske turant baad video links bhejo, "
+        "phir /done bhejo final post banane ke liye.\n"
         "• Telegram channel links auto-ignore honge"
     )
 
@@ -219,33 +127,15 @@ async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None
 @admin_only
 async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     draft = get_session(context)
-    stage = draft.get("stage", STAGE_IMAGES)
+    stage = draft.get("stage", STAGE_PHOTO_LINK)
 
-    if stage == STAGE_IMAGES:
-        if not draft["images"]:
-            await update.effective_message.reply_text("Kam se kam 1 image bhejo.")
-            return
-
-        status_message = await update.effective_message.reply_text("Photos upload ho rahi hain...")
-        try:
-            telegraph_url = await create_telegraph_page(context.application, draft["images"])
-            draft["telegraph_url"] = telegraph_url
-            draft["stage"] = STAGE_LINKS
-            draft["images"] = []
-            await status_message.edit_text(
-                "Photos upload ho gaye ✅\n"
-                f"Telegraph: {telegraph_url}\n\n"
-                "𝗦𝗧𝗘𝗣 𝟮: Ab video links bhejo (text ya photo+caption dono chalega).\n"
-                "Jab sab bhej do, /done phir se bhejo."
-            )
-        except Exception as exc:
-            logger.exception("Failed to create telegraph page")
-            await status_message.edit_text(f"Error: {exc}")
+    if stage == STAGE_PHOTO_LINK:
+        await update.effective_message.reply_text("Pehle JustPaste (photo) ka link bhejo.")
         return
 
-    telegraph_url = draft.get("telegraph_url")
-    if not telegraph_url:
-        await update.effective_message.reply_text("Pehle Step 1 complete karo: images bhejo aur /done karo.")
+    photo_link = draft.get("photo_link")
+    if not photo_link:
+        await update.effective_message.reply_text("Pehle JustPaste (photo) ka link bhejo.")
         return
 
     clean_links = dedupe_keep_order(draft["links"])
@@ -257,43 +147,19 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     try:
         for link_group in chunked(clean_links, 5):
             await update.effective_chat.send_message(
-                build_output_message(telegraph_url, link_group),
+                build_output_message(photo_link, link_group),
                 disable_web_page_preview=True,
             )
 
         context.user_data["draft"] = {
-            "stage": STAGE_IMAGES,
-            "images": [],
+            "stage": STAGE_PHOTO_LINK,
+            "photo_link": None,
             "links": [],
-            "telegraph_url": None,
         }
         await status_message.delete()
     except Exception as exc:
         logger.exception("Failed to finish session")
         await status_message.edit_text(f"Error: {exc}")
-
-
-@admin_only
-async def handle_images(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    draft = get_session(context)
-    message = update.effective_message
-    stage = draft.get("stage", STAGE_IMAGES)
-
-    is_image = bool(message.photo) or (
-        message.document and (message.document.mime_type or "").startswith("image/")
-    )
-
-    if stage == STAGE_IMAGES:
-        if is_image:
-            file_id = message.photo[-1].file_id if message.photo else message.document.file_id
-            draft["images"].append({"file_id": file_id})
-        return
-
-    # Stage 2: image ka use nahi, sirf caption me se video link nikalna hai
-    caption = message.caption or ""
-    urls = URL_RE.findall(caption)
-    if urls:
-        add_links(draft, urls)
 
 
 @admin_only
@@ -304,12 +170,18 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     if text.startswith("/"):
         return
 
-    stage = draft.get("stage", STAGE_IMAGES)
-    if stage != STAGE_LINKS:
-        return
-
+    stage = draft.get("stage", STAGE_PHOTO_LINK)
     urls = URL_RE.findall(text)
     if not urls:
+        return
+
+    if stage == STAGE_PHOTO_LINK:
+        draft["photo_link"] = urls[0]
+        draft["stage"] = STAGE_VIDEO_LINKS
+        await update.effective_message.reply_text(
+            "Photo link mil gaya ✅\n\n"
+            "𝗦𝗧𝗘𝗣 𝟮: Ab video links bhejo. Jab sab bhej do, /done bhejo."
+        )
         return
 
     add_links(draft, urls)
@@ -335,7 +207,6 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("start", start_cmd))
     app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
-    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.IMAGE, handle_images))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     return app
 
