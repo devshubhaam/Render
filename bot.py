@@ -187,6 +187,28 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
     add_links(draft, urls)
 
 
+@admin_only
+async def handle_media_caption(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    draft = get_session(context)
+    caption = update.effective_message.caption or ""
+
+    stage = draft.get("stage", STAGE_PHOTO_LINK)
+    urls = URL_RE.findall(caption)
+    if not urls:
+        return
+
+    if stage == STAGE_PHOTO_LINK:
+        draft["photo_link"] = urls[0]
+        draft["stage"] = STAGE_VIDEO_LINKS
+        await update.effective_message.reply_text(
+            "Photo link mil gaya ✅\n\n"
+            "𝗦𝗧𝗘𝗣 𝟮: Ab video links bhejo. Jab sab bhej do, /done bhejo."
+        )
+        return
+
+    add_links(draft, urls)
+
+
 async def start_health_server() -> web.AppRunner:
     async def health(_request: web.Request) -> web.Response:
         return web.json_response({"status": "ok"})
@@ -208,6 +230,7 @@ def build_application() -> Application:
     app.add_handler(CommandHandler("done", done_cmd))
     app.add_handler(CommandHandler("cancel", cancel_cmd))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
+    app.add_handler(MessageHandler(filters.PHOTO | filters.Document.ALL, handle_media_caption))
     return app
 
 
