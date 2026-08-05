@@ -8,7 +8,7 @@ from typing import Any
 
 from aiohttp import ClientSession, web
 from dotenv import load_dotenv
-from telegram import Update
+from telegram import BotCommand, KeyboardButton, ReplyKeyboardMarkup, Update
 from telegram.ext import Application, ApplicationBuilder, CommandHandler, ContextTypes, MessageHandler, filters
 
 load_dotenv()
@@ -39,6 +39,11 @@ logging.basicConfig(
 logger = logging.getLogger("telegram.minimal.autopost")
 
 telegraph_access_token: str | None = None
+
+MAIN_KEYBOARD = ReplyKeyboardMarkup(
+    [[KeyboardButton("/start"), KeyboardButton("/done")], [KeyboardButton("/cancel")]],
+    resize_keyboard=True,
+)
 
 
 def admin_only(func):
@@ -175,14 +180,15 @@ async def start_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         "𝗦𝗧𝗘𝗣 𝟭: Image links bhejo (jaise ibb.co direct links), jitne chahiye utne. "
         "Phir /done bhejo — Telegraph article ban jayega.\n"
         "𝗦𝗧𝗘𝗣 𝟮: Uske baad video links bhejo, phir /done phir se bhejo final post banane ke liye.\n"
-        "• Telegram channel links auto-ignore honge"
+        "• Telegram channel links auto-ignore honge",
+        reply_markup=MAIN_KEYBOARD,
     )
 
 
 @admin_only
 async def cancel_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     context.user_data.pop("draft", None)
-    await update.effective_message.reply_text("Current session cancel ho gayi.")
+    await update.effective_message.reply_text("Current session cancel ho gayi.", reply_markup=MAIN_KEYBOARD)
 
 
 @admin_only
@@ -237,6 +243,10 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
             "links": [],
         }
         await status_message.delete()
+        await update.effective_chat.send_message(
+            "Post ban gaya ✅ Naya post banane ke liye /start dabao.",
+            reply_markup=MAIN_KEYBOARD,
+        )
     except Exception as exc:
         logger.exception("Failed to finish session")
         await status_message.edit_text(f"Error: {exc}")
@@ -314,6 +324,13 @@ async def run_bot() -> None:
     health_runner = await start_health_server()
 
     await application.initialize()
+    await application.bot.set_my_commands(
+        [
+            BotCommand("start", "Naya post session shuru karo"),
+            BotCommand("done", "Current step complete karo"),
+            BotCommand("cancel", "Session cancel karo"),
+        ]
+    )
     await application.start()
     await application.updater.start_polling(drop_pending_updates=True)
     logger.info("Bot started in polling mode")
