@@ -28,6 +28,7 @@ BACKUP_CHANNEL_LINK = "https://t.me/+n5yhD-8_p79hMTQ1"
 PROVIDED_BY = "@DesiBaddieHub"
 
 URL_RE = re.compile(r"https?://[^\s<>()\[\]{}]+", re.IGNORECASE)
+IMG_SRC_RE = re.compile(r'<img[^>]+src=["\']([^"\']+)["\']', re.IGNORECASE)
 TELEGRAPH_ACCOUNT_URL = "https://api.telegra.ph/createAccount"
 TELEGRAPH_CREATE_PAGE_URL = "https://api.telegra.ph/createPage"
 
@@ -67,6 +68,13 @@ def get_session(context: ContextTypes.DEFAULT_TYPE) -> dict[str, Any]:
             "links": [],
         },
     )
+
+
+def extract_image_urls(text: str) -> list[str]:
+    img_srcs = IMG_SRC_RE.findall(text)
+    if img_srcs:
+        return img_srcs
+    return URL_RE.findall(text)
 
 
 def add_links(draft: dict[str, Any], urls: list[str]) -> None:
@@ -243,15 +251,16 @@ async def handle_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> Non
         return
 
     stage = draft.get("stage", STAGE_IMAGE_LINKS)
-    urls = URL_RE.findall(text)
-    if not urls:
-        return
 
     if stage == STAGE_IMAGE_LINKS:
-        draft["image_links"].extend(urls)
+        urls = extract_image_urls(text)
+        if urls:
+            draft["image_links"].extend(urls)
         return
 
-    add_links(draft, urls)
+    urls = URL_RE.findall(text)
+    if urls:
+        add_links(draft, urls)
 
 
 @admin_only
@@ -260,15 +269,16 @@ async def handle_media_caption(update: Update, context: ContextTypes.DEFAULT_TYP
     caption = update.effective_message.caption or ""
 
     stage = draft.get("stage", STAGE_IMAGE_LINKS)
-    urls = URL_RE.findall(caption)
-    if not urls:
-        return
 
     if stage == STAGE_IMAGE_LINKS:
-        draft["image_links"].extend(urls)
+        urls = extract_image_urls(caption)
+        if urls:
+            draft["image_links"].extend(urls)
         return
 
-    add_links(draft, urls)
+    urls = URL_RE.findall(caption)
+    if urls:
+        add_links(draft, urls)
 
 
 async def start_health_server() -> web.AppRunner:
