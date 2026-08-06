@@ -223,7 +223,7 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.effective_message.reply_text("Pehle Step 1 complete karo: image links bhejo aur /done karo.")
         return
 
-    clean_links = dedupe_keep_order(draft["links"])
+    clean_links = dedupe_keep_order(draft["links"])[::-1]
     if not clean_links:
         await update.effective_message.reply_text("Kam se kam 1 video link bhejo.")
         return
