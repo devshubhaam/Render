@@ -230,7 +230,7 @@ async def done_cmd(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
 
     status_message = await update.effective_message.reply_text("Processing...")
     try:
-        for link_group in chunked(clean_links, 5):
+        for link_group in chunked(clean_links, 10):
             await update.effective_chat.send_message(
                 build_output_message(telegraph_url, link_group),
                 disable_web_page_preview=True,
